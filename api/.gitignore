@@ -27,3 +27,12 @@ vertex_ai_credentials.json
 
 # Ignore Public Docs
 /tech-docs
+
+# Local editor settings
+.vscode/
+
+# Local dependencies
+/vendor/
+
+# Application configuration (including misspelled local file)
+config/applicatoin.yml

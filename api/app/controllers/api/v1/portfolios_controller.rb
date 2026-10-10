@@ -127,8 +127,9 @@ module Api
 
       # GET /api/v1/portfolios/:id/fitgap/:vacancy_id
       def show_fitgap
-        portfolio = Portfolio.find(params[:id])
-        report    = FitGapReport.find_by(portfolio_id: portfolio.id, vacancy_id: params[:vacancy_id])
+        portfolio = Portfolio.joins(:session).merge(Session.all).find(params[:id])
+        vacancy   = Vacancy.find_by(id: params[:vacancy_id])
+        report    = vacancy&.fit_gap_reports&.find_by(portfolio_id: portfolio.id)
 
         if report.nil?
           return json_error("Fit/gap report not found", :not_found)
@@ -153,7 +154,7 @@ module Api
         if @session
           @portfolio = @session.portfolio
         else
-          @portfolio = Portfolio.find(params[:id])
+          @portfolio = Portfolio.joins(:session).merge(Session.all).find(params[:id])
         end
       rescue ActiveRecord::RecordNotFound
         json_error("Portfolio not found", :not_found)
