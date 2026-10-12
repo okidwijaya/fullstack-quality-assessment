@@ -1,0 +1,155 @@
+name: quality-gate
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  quality-gate:
+    name: quality-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: rakamin_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d rakamin_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      RAILS_ENV: test
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_NAME: rakamin_test
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      SECRET_KEY_BASE: ci-only-test-signing-key-not-for-production
+      ALLOWED_ORIGINS: http://localhost:5173
+      REDIS_URL: redis://127.0.0.1:6379/1
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check pull request requirements
+        if: github.event_name == 'pull_request'
+        env:
+          PULL_REQUEST_BODY: ${{ github.event.pull_request.body || '' }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          body = os.environ.get("PULL_REQUEST_BODY", "")
+          sections = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", body))
+          required = {
+              "Specification / PRD",
+              "Acceptance Criteria and Test Scenarios",
+              "Solution / Design Plan",
+              "Tests Added or Updated and Results",
+              "Security / Data-Isolation Impact",
+              "Risks and Rollback",
+          }
+          failures = []
+
+          for index, heading in enumerate(sections):
+              title = heading.group(1).strip()
+              if title not in required:
+                  continue
+              end = sections[index + 1].start() if index + 1 < len(sections) else len(body)
+              content = body[heading.end():end]
+              content = re.sub(r"<!--.*?-->", "", content, flags=re.S).strip()
+              if not content:
+                  failures.append(title)
+
+          missing = required - {match.group(1).strip() for match in sections}
+          failures.extend(sorted(missing))
+
+          if failures:
+              print("Required PR sections must be present and non-empty:")
+              for title in sorted(set(failures)):
+                  print(f"- {title}")
+              sys.exit(1)
+
+          print("Required PR sections are present and non-empty.")
+          PY
+
+      - name: Install PostgreSQL client headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libpq-dev
+
+      - name: Set up Ruby and install locked gems
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3.2"
+          bundler-cache: true
+          working-directory: api
+
+      - name: Prepare test database
+        working-directory: api
+        run: bundle exec rails db:prepare
+
+      - name: Run API specs
+        working-directory: api
+        run: bundle exec rspec
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: web
+        run: npm run build
+
+  release-readiness:
+    name: release-readiness
+    needs: quality-gate
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@v4
+
+      - name: Evaluate release decision and unresolved high risks
+        env:
+          QUALITY_GATE_RESULT: ${{ needs.quality-gate.result }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: python3 .github/scripts/release_readiness.py

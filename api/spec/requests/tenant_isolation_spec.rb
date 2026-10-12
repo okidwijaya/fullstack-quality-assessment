@@ -188,4 +188,133 @@ RSpec.describe 'Tenant isolation API', type: :request do
 
     expect(response).to have_http_status(:not_found)
   end
+
+  describe 'fit-gap generation tenant isolation' do
+    it 'rejects fit-gap generation for a foreign portfolio without enqueueing work' do
+      tenant_a = create_tenant('tenant-a-fitgap-generation-test')
+      tenant_b = create_tenant('tenant-b-fitgap-generation-test')
+      assessor = create(:user, role: 'admin')
+      foreign_portfolio = create_portfolio(tenant_b, assessor)
+      tenant_a_vacancy = create_vacancy(tenant_a, assessor)
+      headers = authorization_headers(assessor, tenant_a)
+
+      expect(FitGapGeneratorWorker).not_to receive(:perform_async)
+
+      post "/api/v1/portfolios/#{foreign_portfolio.id}/fitgap",
+           params: { fitgap: { vacancy_id: tenant_a_vacancy.id } },
+           headers: headers
+
+      expect(response).to have_http_status(:not_found)
+    end
+
+    it 'rejects fit-gap regeneration for a foreign portfolio without enqueueing work' do
+      tenant_a = create_tenant('tenant-a-fitgap-regeneration-test')
+      tenant_b = create_tenant('tenant-b-fitgap-regeneration-test')
+      assessor = create(:user, role: 'admin')
+      foreign_portfolio = create_portfolio(tenant_b, assessor)
+      tenant_a_vacancy = create_vacancy(tenant_a, assessor)
+      headers = authorization_headers(assessor, tenant_a)
+
+      expect(FitGapGeneratorWorker).not_to receive(:perform_async)
+
+      post "/api/v1/portfolios/#{foreign_portfolio.id}/regenerate_fitgap",
+           params: { vacancy_id: tenant_a_vacancy.id },
+           headers: headers
+
+      expect(response).to have_http_status(:not_found)
+    end
+
+    it 'queues generation for same-tenant portfolio and vacancy pairs' do
+      tenant = create_tenant('tenant-same-fitgap-generation-test')
+      assessor = create(:user, role: 'admin')
+      portfolio = create_portfolio(tenant, assessor)
+      vacancy = create_vacancy(tenant, assessor)
+      headers = authorization_headers(assessor, tenant)
+
+      expect(FitGapGeneratorWorker).to receive(:perform_async)
+        .with(portfolio.id, vacancy.id).twice.and_return('job-id')
+
+      post "/api/v1/portfolios/#{portfolio.id}/fitgap",
+           params: { fitgap: { vacancy_id: vacancy.id } },
+           headers: headers
+
+      expect(response).to have_http_status(:accepted)
+
+      post "/api/v1/portfolios/#{portfolio.id}/regenerate_fitgap",
+           params: { vacancy_id: vacancy.id },
+           headers: headers
+
+      expect(response).to have_http_status(:accepted)
+    end
+
+    it 'does not invoke fit-gap generation for a portfolio and vacancy in different tenants' do
+      tenant_a = create_tenant('tenant-a-fitgap-worker-test')
+      tenant_b = create_tenant('tenant-b-fitgap-worker-test')
+      assessor = create(:user, role: 'admin')
+      foreign_portfolio = create_portfolio(tenant_b, assessor)
+      tenant_a_vacancy = create_vacancy(tenant_a, assessor)
+
+      expect(FitGap::Engine).not_to receive(:new)
+
+      FitGapGeneratorWorker.new.perform(foreign_portfolio.id, tenant_a_vacancy.id)
+
+      expect(
+        FitGapReport.exists?(portfolio_id: foreign_portfolio.id, vacancy_id: tenant_a_vacancy.id)
+      ).to be(false)
+    end
+
+    it 'invokes fit-gap generation for a same-tenant portfolio and vacancy' do
+      tenant = create_tenant('tenant-same-fitgap-worker-test')
+      assessor = create(:user, role: 'admin')
+      portfolio = create_portfolio(tenant, assessor)
+      vacancy = create_vacancy(tenant, assessor)
+      engine = instance_double(FitGap::Engine, call: nil)
+
+      expect(FitGap::Engine).to receive(:new)
+        .with(portfolio: portfolio, vacancy: vacancy).and_return(engine)
+      expect(engine).to receive(:call)
+
+      FitGapGeneratorWorker.new.perform(portfolio.id, vacancy.id)
+    end
+  end
+
+  def create_tenant(scheme)
+    Organization.create!(
+      name: scheme,
+      scheme: scheme,
+      identifier: scheme,
+      host: "#{scheme}.example.com"
+    )
+  end
+
+  def create_portfolio(tenant, assessor)
+    assessment = Assessment.unscoped.create!(
+      tenant_id: tenant.id,
+      created_by: assessor.id,
+      name: "#{tenant.name} assessment",
+      time_limit_min: 30
+    )
+    session = Session.unscoped.create!(
+      tenant_id: tenant.id,
+      assessment_id: assessment.id
+    )
+    Portfolio.create!(session: session, generation_status: 'complete')
+  end
+
+  def create_vacancy(tenant, assessor)
+    Vacancy.unscoped.create!(
+      tenant_id: tenant.id,
+      created_by: assessor.id,
+      role_title: "#{tenant.name} vacancy"
+    )
+  end
+
+  def authorization_headers(assessor, tenant)
+    token = JsonWebToken.encode(
+      user_id: assessor.id,
+      role: 'admin',
+      scheme: tenant.scheme
+    )
+    { 'Authorization' => "Bearer #{token}" }
+  end
 end
