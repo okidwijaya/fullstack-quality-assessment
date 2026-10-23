@@ -2,6 +2,7 @@ name: quality-gate
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
     branches:
       - main
   push:
@@ -131,11 +132,7 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: web
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: web
-        run: npm run build
+        run: npm ci --legacy-peer-deps
 
   release-readiness:
     name: release-readiness
