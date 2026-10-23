@@ -1,6 +1,6 @@
 require 'rails_helper'
 
-RSpec.describe CoverageWebSocketMiddleware, type: :request do
+RSpec.describe CoverageWebsocketMiddleware, type: :request do
   let(:tenant) do
     Organization.create!(
       name: 'Coverage WebSocket Tenant',
